@@ -21,52 +21,85 @@ class VoiceHandler:
         self.llm = LLM()
         self.tts = TTS()
         self.is_paused = False
-        self._abort = threading.Event()
-        self._turn_lock = threading.Lock()
+        self.stop_speaking = threading.Event()
+        self.saved_greeting = None
+        self.saved_time = 0.0
+        self.turn_lock = threading.Lock()
 
-    def _answer(self, prompt, stt_ms=0, abort=None):
-        """Run LLM in a producer thread and TTS on the consumer thread."""
-        q = queue.Queue()
+    def merge_hesitation(self, raw_text):
+        """Merge a pending greeting with the new turn when close in time."""
+        now = time.time()
+        if self.saved_greeting and now - self.saved_time <= 1.8:
+            merged = self.saved_greeting + " " + raw_text
+            self.saved_greeting = None
+            return merged
+        self.saved_greeting = None
+        return raw_text
+
+    def stream_reply(self, prompt, sentence_box, stop_speaking, stt_ms=0):
+        """Run LLM in a producer thread and yield TTS audio chunks."""
         def producer():
             try:
-                for sentence in self.llm.ask(prompt, abort=abort):
-                    if abort is not None and abort.is_set():
+                for sentence in self.llm.ask(prompt, abort=stop_speaking):
+                    if stop_speaking.is_set():
                         break
-                    q.put(sentence)
+                    sentence_box.put(sentence)
             finally:
-                q.put(None)
+                sentence_box.put(None)
+
         threading.Thread(target=producer, daemon=True).start()
         start = time.time()
         first = None
         while True:
-            if abort is not None and abort.is_set():
+            if stop_speaking.is_set():
                 break
-            sentence = q.get()
+            sentence = sentence_box.get()
             if sentence is None:
                 break
-            if abort is not None and abort.is_set():
+            if stop_speaking.is_set():
                 break
-            for chunk in self.tts.speak(sentence):
-                if abort is not None and abort.is_set():
+            for audio_chunk in self.tts.speak(sentence):
+                if stop_speaking.is_set():
                     break
                 if first is None:
                     first = (time.time() - start) * 1000
                     print(f"[STT: {stt_ms:.0f}ms | Time to First Audio: {first:.0f}ms]")
-                yield chunk
+                yield audio_chunk
 
     def handle_voice_turn(self, audio):
         """Process one captured audio turn."""
         sr, data = audio
         stt_start = time.time()
-        text = self.stt.transcribe(data, sr)
+        raw_text = self.stt.transcribe(data, sr)
         stt_ms = (time.time() - stt_start) * 1000
-        if not text:
+        if not raw_text:
             return
-        print(f"[User]: {text}")
-        self._abort.clear()
+        fillers = {"um", "uh", "hmm", "ah", "oh", "so", "well"}
+        words = raw_text.split()
+        if words and all(w.strip("!.,").lower() in fillers for w in words):
+            return
+        raw_text = self.merge_hesitation(raw_text)
+        if raw_text.strip().lower().strip("!.") in {"hello", "hi", "hey"}:
+            self.saved_greeting = raw_text
+            self.saved_time = time.time()
+            deadline = time.time() + 1.1
+            while time.time() < deadline:
+                time.sleep(0.1)
+                if self.saved_greeting is None:
+                    return
+            if self.saved_greeting == raw_text:
+                self.saved_greeting = None
+            self.stop_speaking.set()
+            self.stop_speaking = threading.Event()
+            with self.turn_lock:
+                yield from self.stream_reply(raw_text, queue.Queue(), self.stop_speaking, stt_ms)
+            return
+        print(f"[User]: {raw_text}")
+        self.stop_speaking.set()
+        self.stop_speaking = threading.Event()
         try:
-            with self._turn_lock:
-                intent = detect_intent(text, self.is_paused)
+            with self.turn_lock:
+                intent = detect_intent(raw_text, self.is_paused, settings.OLLAMA_MODEL)
                 action = intent["action"]
                 prompt = intent["prompt"]
                 if action == "pause":
@@ -85,17 +118,28 @@ class VoiceHandler:
                     self.llm.reset_history()
                     self.is_paused = False
                     if prompt:
-                        yield from self._answer(prompt, stt_ms, abort=self._abort)
+                        sentence_box = queue.Queue()
+                        yield from self.stream_reply(prompt, sentence_box, self.stop_speaking, stt_ms)
                     else:
                         yield from self.tts.speak("History cleared.")
                     return
+                if action in ("voice", "speed", "model"):
+                    if action == "voice":
+                        self.tts.set_voice(voice=prompt)
+                    elif action == "speed":
+                        self.tts.set_voice(speed=float(prompt))
+                    elif action == "model":
+                        self.llm.set_model(prompt)
+                    yield from self.tts.speak("Updated.")
+                    return
                 if self.is_paused:
                     return
-                yield from self._answer(prompt, stt_ms, abort=self._abort)
+                sentence_box = queue.Queue()
+                yield from self.stream_reply(prompt, sentence_box, self.stop_speaking, stt_ms)
         finally:
-            self._abort.set()
+            self.stop_speaking.set()
 
     def create_stream(self):
         """Create the FastRTC audio stream."""
-        algo = AlgoOptions(audio_chunk_duration=0.25, started_talking_threshold=0.15, speech_threshold=0.08)
+        algo = AlgoOptions(audio_chunk_duration=0.45, started_talking_threshold=0.18, speech_threshold=0.1)
         return Stream(handler=ReplyOnPause(self.handle_voice_turn, can_interrupt=True, algo_options=algo), modality="audio", mode="send-receive")
