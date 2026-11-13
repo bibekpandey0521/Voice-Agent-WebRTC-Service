@@ -1,0 +1,8 @@
+fastrtc
+fastapi
+uvicorn
+faster-whisper
+numpy
+httpx
+pydantic-settings
+python-dotenv
