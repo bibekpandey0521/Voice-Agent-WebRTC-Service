@@ -17,17 +17,23 @@ class LLM:
         self.model = settings.OLLAMA_MODEL
         self.client = httpx.Client(base_url=settings.OLLAMA_BASE_URL, timeout=60.0)
         self.history = []
+        self._abort = None
         try:
             self.client.post("/api/chat", json={"model": self.model, "messages": [{"role": "user", "content": "hi"}], "stream": False, "keep_alive": "30m", "options": {"num_predict": 1, "num_ctx": 512}}, timeout=10.0)
         except Exception:
             pass
 
+    def set_model(self, new_model):
+        """Switch the active model."""
+        self.model = new_model
+
     def reset_history(self):
         """Clear history."""
         self.history = []
 
-    def ask(self, prompt):
-        """Yield reply sentences."""
+    def ask(self, prompt, abort=None):
+        """Yield reply sentences, stopping when abort is set."""
+        self._abort = abort
         self.history.append({"role": "user", "content": prompt})
         self.history = self.history[-6:]
         messages = [{"role": "system", "content": SYSTEM}] + self.history
@@ -38,12 +44,14 @@ class LLM:
         with self.client.stream("POST", "/api/chat", json=payload) as response:
             response.raise_for_status()
             for line in response.iter_lines():
+                if abort is not None and abort.is_set():
+                    break
                 if not line:
                     continue
                 data = json.loads(line)
                 token = data.get("message", {}).get("content", "")
                 buffer += token
-                if not yielded_first and len(buffer) >= 20:
+                if not yielded_first and len(buffer) >= 18:
                     idx = -1
                     for i, c in enumerate(buffer):
                         if c in CLAUSE or c in PUNCT:
@@ -70,8 +78,9 @@ class LLM:
                     buffer = buffer[last:]
                 if data.get("done", False):
                     break
-        if buffer.strip():
-            yield buffer.strip()
-            full += buffer.strip()
+        if abort is None or not abort.is_set():
+            if buffer.strip():
+                yield buffer.strip()
+                full += buffer.strip()
         self.history.append({"role": "assistant", "content": full.strip()})
         self.history = self.history[-6:]
