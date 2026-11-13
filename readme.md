@@ -1,313 +1,168 @@
-# Local Real-Time Voice Agent
+# 🎙️ Local Real-Time Voice Agent
 
-A local-first, real-time voice assistant built with **Python, WebRTC, Faster-Whisper, Ollama, and Kokoro TTS**.
+A privacy-focused, local-first AI voice assistant powered by **Python, WebRTC, Faster-Whisper, Ollama, and Kokoro TTS**. 
 
-Speak through your browser microphone and receive spoken responses. The pipeline transcribes your speech, streams a response from a locally hosted language model, and starts generating speech sentence by sentence. It also supports interruption handling and optional background conversation logging through an n8n webhook.
-
-> **Designed for local development:** Speech recognition, language generation, and speech synthesis can run on your own machine. The optional n8n webhook sends conversation data to the endpoint you configure.
+Capture audio through your browser microphone, transcribe speech locally, generate responses via a local LLM, and hear natural speech streamed back sentence-by-sentence—all without sending your voice data to the cloud.
 
 ---
 
-## Features
+## ✨ Key Features
 
-- **Browser-based microphone input** using WebRTC and FastRTC.
-- **Speech-to-text** with Faster-Whisper.
-- **Local LLM responses** streamed from Ollama.
-- **Text-to-speech** using Kokoro.
-- **Sentence-level audio streaming** so speech can begin before the full response is generated.
-- **Interruption support** through FastRTC's interrupt handling.
-- **Optional n8n logging** dispatched in a background thread to avoid blocking the voice pipeline.
-- **FastAPI health endpoint** for backend checks and custom frontend integrations.
+* **Real-Time WebRTC Audio:** Low-latency microphone capture and audio playback directly in the browser using **FastRTC**.
+* **100% Local AI Pipeline:** Runs speech-to-text (**Faster-Whisper**), language generation (**Ollama**), and text-to-speech (**Kokoro TTS**) entirely on your machine.
+* **Sentence-Level Streaming:** Starts synthesizing and playing audio as soon as the first sentence is generated, drastically reducing perceived latency.
+* **Voice Interruption:** Naturally interrupt the assistant mid-sentence to start a new turn.
+* **Modular & Extensible:** Cleanly separated pipeline stages with a **FastAPI** backend and optional asynchronous **n8n** webhook logging.
 
-## How It Works
+---
 
-When the user finishes a speech segment, the application processes it through the following pipeline:
+## 🏗️ System Architecture
+
+The application uses an event-driven pipeline orchestrated by `VoicePipelineOrchestrator`. Audio is processed in stages, allowing text generation and speech synthesis to overlap.
 
 ```mermaid
-flowchart TD
-    A[Browser microphone] --> B[WebRTC / FastRTC]
-    B --> C[handler.py - Voice orchestrator]
-    C --> D[stt.py - Faster-Whisper]
-    D -->|Transcribed text| E[llm.py - Ollama]
-    E -->|Streamed sentences| F[tts.py - Kokoro]
-    F -->|Audio chunks| G[Browser speakers]
-    C -. Optional background logging .-> H[n8n_client.py]
-    H --> I[n8n webhook]
+flowchart LR
+    subgraph Client ["🌐 Browser Client"]
+        Mic["🎤 Microphone"]
+        Speaker["🔊 Audio Output"]
+    end
+
+    subgraph Backend ["⚙️ Python / FastAPI Backend"]
+        WebRTC["FastRTC Handler"]
+        STT["Faster-Whisper (STT)"]
+        LLM["Ollama Stream (LLM)"]
+        Buffer["Sentence Buffer"]
+        TTS["Kokoro (TTS)"]
+    end
+
+    subgraph Optional ["🔗 Async Automation"]
+        n8n["n8n Webhook"]
+    end
+
+    Mic -->|WebRTC| WebRTC
+    WebRTC -->|16kHz Mono| STT
+    STT -->|Text| LLM
+    LLM -->|Tokens| Buffer
+    Buffer -->|Complete Sentence| TTS
+    TTS -->|Audio Chunks| WebRTC
+    WebRTC -->|WebRTC| Speaker
+    LLM -.->|Background Thread| n8n
 ```
 
-### Pipeline stages
+### How It Works
+1. **Capture & Preprocess:** FastRTC detects speech pauses, converts incoming stereo audio to mono, normalizes samples, and resamples to 16 kHz.
+2. **Transcribe:** Faster-Whisper converts the audio buffer into text.
+3. **Stream & Synthesize:** The prompt is sent to Ollama. As tokens stream back, a buffer extracts complete sentences and immediately passes them to Kokoro TTS so you hear the start of the answer while the rest is still generating.
+4. **Log (Optional):** Once the turn finishes, a background thread dispatches the prompt and response to an n8n webhook without blocking the audio loop.
 
-1. **Audio capture** — The browser captures microphone audio and sends it through WebRTC/FastRTC.
-2. **Voice turn detection** — `handler.py` receives the completed audio segment when the user pauses.
-3. **Speech recognition** — `stt.py` converts the audio to the format expected by Faster-Whisper and transcribes it.
-4. **Response generation** — `llm.py` sends the transcription to Ollama and streams generated text.
-5. **Sentence splitting** — Complete sentences are yielded as soon as possible instead of waiting for the entire response.
-6. **Speech synthesis** — `tts.py` converts each sentence into audio for playback.
-7. **Optional logging** — `n8n_client.py` sends the user prompt and assistant response to the configured webhook in a background thread.
+---
 
-## Technology Stack
-
-| Component | Technology | Purpose |
-|---|---|---|
-| Browser audio | WebRTC / FastRTC | Captures and streams microphone audio |
-| Backend | Python / FastAPI | Application and API server |
-| Speech-to-text | Faster-Whisper | Converts speech into text |
-| Language model | Ollama | Runs the local chat model |
-| Text-to-speech | Kokoro TTS | Converts response text into speech |
-| Automation | n8n (optional) | Receives conversation logs through a webhook |
-
-## Project Structure
+## 📁 Project Structure
 
 ```text
 Voice-Agent-WebRTC-Service/
-│
-├── main.py                      # Application entry point
-├── requirements.txt             # Python dependencies
+├── main.py                     # Application entry point
+├── requirements.txt            # Python dependencies
 ├── config/
-│   └── settings.py              # Model names, URLs, and environment settings
-│
+│   └── settings.py             # Centralized configuration (models, URLs)
 └── src/
-    ├── server.py                # FastAPI setup, CORS, and health route
-    │
+    ├── server.py               # FastAPI app, CORS, and /health endpoint
     ├── webrtc/
-    │   └── handler.py            # Voice pipeline orchestration
-    │
+    │   └── handler.py          # FastRTC stream & VoicePipelineOrchestrator
     ├── pipeline/
-    │   ├── stt.py                # Faster-Whisper speech recognition
-    │   ├── llm.py                # Ollama streaming and sentence splitting
-    │   └── tts.py                # Kokoro speech generation
-    │
+    │   ├── stt.py              # Faster-Whisper transcription service
+    │   ├── llm.py              # Ollama streaming & sentence chunking
+    │   └── tts.py              # Kokoro speech synthesis
     └── automation/
-        └── n8n_client.py         # Optional background webhook sender
+        └── n8n_client.py       # Non-blocking n8n webhook client
 ```
 
-## Getting Started
+---
+
+## 🚀 Getting Started
 
 ### 1. Prerequisites
+* **Python 3.10+**
+* **Ollama** installed and running locally ([Download Ollama](https://ollama.com/))
 
-Make sure the following are installed:
-
-- **Python 3.10 or later**
-- **Git**
-- **Ollama** — installed and running locally
-- A supported browser with microphone access
-
-Download Ollama from [ollama.com](https://ollama.com/).
-
-Pull the example language model:
-
+Pull the default language model before starting:
 ```bash
 ollama pull llama3.2
 ```
 
-Make sure the Ollama service is running before starting the application. The default local API address is `http://localhost:11434`.
-
-### 2. Clone the repository
+### 2. Installation
+Clone the repository and set up a virtual environment:
 
 ```bash
 git clone https://github.com/bibekpx/Voice-Agent-WebRTC-Service.git
 cd Voice-Agent-WebRTC-Service
-```
 
-### 3. Create and activate a virtual environment
-
-**Windows (Command Prompt):**
-
-```bat
+# Create and activate virtual environment
 python -m venv .venv
-.venv\Scripts\activate
-```
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
 
-**Windows (PowerShell):**
-
-```powershell
-python -m venv .venv
-.venv\Scripts\Activate.ps1
-```
-
-**Linux / macOS:**
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-```
-
-### 4. Install dependencies
-
-```bash
-python -m pip install --upgrade pip
+# Install dependencies
+pip install --upgrade pip
 pip install -r requirements.txt
 ```
+*(Note: For GPU acceleration with Faster-Whisper, ensure compatible CUDA and cuDNN libraries are installed for your environment.)*
 
-### 5. Configure the application
+### 3. Configuration
+Review `config/settings.py` to customize your models and endpoints:
 
-Review `config/settings.py` and set the values for your local environment. Use a `.env` file only if your settings implementation is configured to read one.
+| Setting | Default | Description |
+| :--- | :--- | :--- |
+| `WHISPER_MODEL_SIZE` | `base.en` | Whisper model size (`tiny.en`, `base.en`, `small.en`) |
+| `OLLAMA_BASE_URL` | `http://localhost:11434` | Local Ollama API endpoint |
+| `OLLAMA_MODEL` | `llama3.2` | Local LLM used for responses |
+| `N8N_WEBHOOK_URL` | `""` | Optional webhook URL for conversation logging |
 
-| Setting | Example | Description |
-|---|---|---|
-| `WHISPER_MODEL_SIZE` | `base.en` | Faster-Whisper model size. Other examples include `tiny.en` and `small.en`. |
-| `OLLAMA_BASE_URL` | `http://localhost:11434` | Address of the local Ollama API. |
-| `OLLAMA_MODEL` | `llama3.2` | Model name available in Ollama. |
-| `N8N_WEBHOOK_URL` | Empty string | Optional n8n webhook URL. Leave empty to disable webhook logging. |
+### 4. Running the Application
 
-The values above are examples. Use the setting names and defaults defined by the current application code.
-
-### 6. Run the application
-
-Choose one of the following modes.
-
-#### Option A: Browser test interface
-
-Recommended for local development:
-
+**Start the Voice UI (FastRTC):**
 ```bash
 python main.py
 ```
+Open `http://localhost:7860` in your browser, grant microphone permissions, and start talking.
 
-Open the interface in your browser:
-
-```text
-http://localhost:7860
-```
-
-Allow microphone access when prompted, then start speaking.
-
-#### Option B: FastAPI backend
-
-Use this mode when connecting a custom React, Next.js, or other frontend:
-
+**Start the FastAPI Server (Custom Frontends):**
 ```bash
 uvicorn main:app --host 0.0.0.0 --port 8000 --reload
 ```
+Verify the server is running via `GET http://localhost:8000/health`.
 
-Health endpoint:
+---
 
-```text
-GET http://localhost:8000/health
+## 🔌 Optional n8n Integration
+
+To log conversations to an external workflow, add your webhook URL in `config/settings.py`. The service sends an asynchronous `POST` request at the end of each turn:
+
+```json
+{
+  "user_prompt": "Explain machine learning",
+  "assistant_response": "Machine learning is a branch of artificial intelligence..."
+}
 ```
-
-> Run the command that matches the application entry point and exported FastAPI object in your checkout. The backend command assumes `main.py` exposes an `app` object.
-
----
-
-## Where to Make Changes
-
-| To change... | File | Main function / area |
-|---|---|---|
-| Assistant personality or system prompt | `src/pipeline/llm.py` | `generate_sentence_stream()` |
-| Whisper model or compute device | `src/pipeline/stt.py` | `STTService.__init__()` |
-| TTS voice or synthesis settings | `src/pipeline/tts.py` | `stream_audio()` |
-| FastAPI routes | `src/server.py` | `create_app()` |
-| n8n webhook payload | `src/automation/n8n_client.py` | `_send_webhook_sync()` |
-| Voice interruption behavior | `src/webrtc/handler.py` | `create_stream()` and `ReplyOnPause(...)` |
-
-### Switching Whisper to CUDA
-
-The current configuration is described as CPU `int8`. To try GPU inference, review the Faster-Whisper/CTranslate2 CUDA requirements for your environment, then update the model initialization in `src/pipeline/stt.py` (for example, the device and compute type). Do not switch to CUDA unless the required NVIDIA drivers and CUDA libraries are installed and compatible.
+> **Privacy Note:** Enabling `N8N_WEBHOOK_URL` transmits conversation text to that endpoint. Leave it blank for 100% offline operation.
 
 ---
 
-## Function Call Flow
+## ⚙️ Customization & Troubleshooting
 
-The main voice-turn flow is coordinated by `VoicePipelineOrchestrator.handle_voice_turn(audio)` in `src/webrtc/handler.py`.
+### Quick Customization Map
+* **Assistant Persona / System Prompt:** Edit `generate_sentence_stream()` in `src/pipeline/llm.py`.
+* **TTS Voice Profile:** Update `stream_audio()` in `src/pipeline/tts.py`.
+* **Interruption & VAD Sensitivity:** Adjust `ReplyOnPause` parameters in `src/webrtc/handler.py`.
 
-```text
-VoicePipelineOrchestrator.handle_voice_turn(audio)
-    │
-    ├── STTService.transcribe(audio_data, sample_rate)
-    │      └── Returns the recognized user text
-    │
-    ├── LLMService.generate_sentence_stream(user_prompt)
-    │      └── Streams generated text and yields complete sentences
-    │
-    ├── TTSService.stream_audio(sentence)
-    │      └── Produces audio for each sentence
-    │
-    └── trigger_n8n_flow(user_prompt, full_reply)   [optional]
-           └── Sends the log in a background thread
-```
-
-### Audio processing in STT
-
-The STT stage is responsible for preparing the captured audio before transcription. Depending on the incoming audio format, the processing described by the project includes:
-
-- Converting stereo audio to mono.
-- Normalizing `int16` samples to `float32` when required.
-- Resampling audio to 16 kHz when the input sample rate differs.
-- Passing the prepared audio to Faster-Whisper.
-
-### Streaming response and speech
-
-`llm.py` consumes the Ollama streaming response and groups generated text into complete sentences. `tts.py` can then synthesize each yielded sentence while the LLM continues generating the rest of the response. This reduces the wait before the first spoken response compared with generating the full answer before starting TTS.
+### Common Issues
+* **Ollama Connection Error:** Ensure the Ollama service is active (`ollama serve`) and accessible at `http://localhost:11434`.
+* **No Audio / Mic Issues:** Ensure your browser has microphone permissions enabled. If deploying remotely, **HTTPS is required** by modern browsers for WebRTC microphone access.
+* **High Latency:** Switch to `tiny.en` in `settings.py`, use a smaller quantized Ollama model, or enable CUDA for Faster-Whisper.
 
 ---
 
-## Performance and Development Notes
+## 🤝 Contributing & License
 
-Keep these guidelines in mind when extending the pipeline:
+Contributions are welcome! Please fork the repository, create a feature branch, and submit a pull request. Ensure you do not commit local model weights or `.env` secrets.
 
-1. **Do not block the audio loop.** Database operations, webhook calls, and other slow I/O should run outside the real-time processing path. The n8n integration uses a background thread for this reason.
-2. **Preserve contiguous NumPy arrays where required.** Keep `np.ascontiguousarray()` in the STT/TTS processing paths when the downstream library expects contiguous memory. Removing it can cause compatibility or performance problems.
-3. **Keep spoken output clean.** Avoid Markdown formatting, emoji, and decorative symbols in the LLM system prompt when the response will be read aloud. Otherwise, the TTS engine may attempt to speak those symbols or formatting cues.
-4. **Stream incrementally.** Yield complete sentences as they become available rather than waiting for the entire LLM response.
-5. **Keep optional integrations optional.** The voice pipeline should continue to work when `N8N_WEBHOOK_URL` is not configured.
-
-## Troubleshooting
-
-### Ollama connection error
-
-- Confirm Ollama is installed and running.
-- Check that `OLLAMA_BASE_URL` points to the correct local API address.
-- Confirm the configured model is available:
-
-  ```bash
-  ollama list
-  ```
-
-- Pull the model if it is missing:
-
-  ```bash
-  ollama pull llama3.2
-  ```
-
-### Microphone is not available
-
-- Allow microphone access in your browser.
-- Check that the correct input device is selected in your operating system and browser.
-- Close other applications that may be using the microphone.
-- Try the local interface at `http://localhost:7860`.
-
-### Model startup or dependency errors
-
-- Activate the project's virtual environment.
-- Reinstall dependencies from `requirements.txt`.
-- Confirm that your Python version meets the project's requirement.
-- Check the terminal output for the first underlying exception; later errors may be a consequence of that initial failure.
-
-### n8n logs are not received
-
-- Confirm that `N8N_WEBHOOK_URL` is configured correctly.
-- Verify that the n8n workflow is active and its webhook path is correct.
-- Check the application logs for webhook connection or response errors.
-- Leave the setting empty to run without n8n logging.
-
----
-
-## Contributing
-
-Contributions and improvements are welcome. Before submitting changes:
-
-1. Keep the real-time audio path responsive.
-2. Test the affected STT, LLM, or TTS stage independently where possible.
-3. Verify that the browser interface and health endpoint still start correctly.
-4. Avoid committing local model files, virtual environments, secrets, or machine-specific configuration.
-
-## License
-
-Add the repository's license information here once a license has been selected and committed.
-
----
-
-**Repository:** [Voice-Agent-WebRTC-Service](https://github.com/bibekpx/Voice-Agent-WebRTC-Service)
-#   V o i c e - A g e n t - W e b R T C - S e r v i c e  
- 
+*License: [MIT](LICENSE)* *(Update with your chosen license file)*
